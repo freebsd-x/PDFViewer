@@ -1,0 +1,13 @@
+{
+  "name": "PDF Viewer",
+  "version": "1.0.0",
+  "identifier": "com.freebsdx.pdfviewer",
+  "executable": "bin/pdfviewer",
+  "icon": "Resources/icon.svg",
+  "permissions": [
+    "com.freebsdx.permission.UI"
+  ],
+  "mime_types": [
+    "application/pdf"
+  ]
+}
