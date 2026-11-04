@@ -10,11 +10,13 @@
 //   • Page navigation: prev/next buttons
 //   • Text search: scan all pages, report "match X of N" and jump to matching page
 //   • ARGB32→RGBA pixel conversion (poppler little-endian BGRA → OpenGL RGBA)
-//   • Opens via --open <path> (before Capsicum sandbox) or positional arg
+//   • Opens via --open <path> (before Capsicum sandbox), positional arg, or Open…
 
 #include "xkit/widget.h"
 #include "xkit/application.h"
 #include "xkit/xbus_client.h"
+#include "xkit/file_dialog.h"
+#include "xkit/media_file.h"
 #include "shared/protocol.h"
 #include <poppler/cpp/poppler-document.h>
 #include <poppler/cpp/poppler-page.h>
@@ -74,17 +76,17 @@ int main(int argc, char** argv) {
         open_path = argv[1];
 
     // Load document before XApplication::Run (which calls cap_enter).
-    std::unique_ptr<poppler::document> doc;
+    auto doc = std::make_shared<std::unique_ptr<poppler::document>>();
     int n_pages = 0;
     if (!open_path.empty()) {
-        doc.reset(poppler::document::load_from_file(open_path));
-        if (doc) n_pages = doc->pages();
+        doc->reset(poppler::document::load_from_file(open_path));
+        if (*doc) n_pages = (*doc)->pages();
     }
 
     // ── Shared state ─────────────────────────────────────────────────────────
     auto current_page  = std::make_shared<int>(0);
     auto zoom_idx      = std::make_shared<int>(kZoomDefault);
-    auto doc_ptr       = std::make_shared<poppler::document*>(doc.get());
+    auto doc_ptr       = std::make_shared<poppler::document*>(doc->get());
     auto total_pages   = std::make_shared<int>(n_pages);
 
     struct SearchMatch { int page; };
@@ -215,12 +217,40 @@ int main(int argc, char** argv) {
         return d;
     };
 
+    // Past start-up the sandbox opens no paths: the user picks, in the shell.
+    auto open_btn = std::make_shared<ButtonWidget>("Open…",
+        [=]() {
+            auto* bus = XApplication::getBus();
+            if (!bus) return;
+            XFileDialog::pickToOpen(*bus, "Open PDF", "", [=](XFileDialog::Picked p) {
+                if (p.cancelled) return;
+                if (!p.fd) { fname_lbl->setText("Couldn't open that file: " + p.error); return; }
+                std::string bytes;
+                if (!readAllFd(p.fd.get(), bytes)) { fname_lbl->setText("Couldn't read that file"); return; }
+                poppler::byte_array data(bytes.begin(), bytes.end());
+                std::unique_ptr<poppler::document> opened(poppler::document::load_from_data(&data));
+                if (!opened || opened->is_locked()) {
+                    fname_lbl->setText(basename(p.path) + (opened ? " is locked" : " isn't a readable PDF"));
+                    return;
+                }
+                // (load_from_data takes over `data`; a bad file left the open one alone)
+                *doc = std::move(opened);
+                *doc_ptr = doc->get();
+                *total_pages = (*doc)->pages();
+                *current_page = 0;
+                fname_lbl->setText(basename(p.path));
+                XApplication::setTitle("PDF Viewer — " + basename(p.path));
+                if (*render_page) (*render_page)();
+            });
+        });
+
     auto toolbar = std::make_shared<FlexRow>();
     toolbar->setFixedSize(0.0f, 44.0f);
     toolbar->setPadding(6.0f);
     toolbar->setGap(6.0f);
     toolbar->setBackgroundColor(Color{0.14f, 0.14f, 0.14f, 1.0f});
     toolbar->setCrossAxisAlignment(CrossAxisAlignment::Center);
+    toolbar->addChild(open_btn);
     toolbar->addChild(fname_lbl);
     toolbar->addChild(div_w(1.0f));
     toolbar->addChild(prev_btn);
@@ -274,7 +304,7 @@ int main(int argc, char** argv) {
                 poppler::document* d = *doc_ptr;
                 if (!d || *total_pages == 0) {
                     auto lbl = std::make_shared<TextWidget>(
-                        "No PDF loaded.  Pass --open <path>.", 14.0f);
+                        "No PDF open. Choose Open… to pick one.", 14.0f);
                     lbl->setColor(Color{0.60f, 0.60f, 0.60f, 1.0f});
                     lbl->setPadding(40.0f);
                     page_content->addChild(lbl);
@@ -347,11 +377,6 @@ int main(int argc, char** argv) {
                     match_lbl->setText("No matches");
                 }
             };
-
-            // ── XBus broadcasts ───────────────────────────────────────────────
-            xbus.OnBroadcast([](const XBusMessage& /*bcast*/) {
-                // LaunchWithFile for application/pdf would go here
-            });
 
             // ── Initial render ────────────────────────────────────────────────
             if (*render_page) (*render_page)();
